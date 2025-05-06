@@ -121,7 +121,8 @@ const educationalTlds = new Set([
 	".ac.in",
 	".ac.com",
 	".edu.jp",
-	".co.in", // Indian company domain often used by educational institutions
+	".co.in",
+	".nic.in",
 	".ac.jp",
 	".edu.kr",
 	".ac.kr",
