@@ -1,16 +1,11 @@
-// --- START OF FILE scraper.js ---
-
 import * as cheerio from "cheerio";
 import axios from "axios";
 
-// --- Configuration ---
-const MAX_PAGES_TO_SCRAPE = 10; // Limit the number of pages to avoid excessive crawling
-const REQUEST_TIMEOUT = 10000; // 10 seconds timeout per request
+const MAX_PAGES_TO_SCRAPE = 50;
+const REQUEST_TIMEOUT = 100000;
 const USER_AGENT =
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36";
-// --- End Configuration ---
 
-// Scrape a single page and extract its content and links
 const scrapePageContent = async (url, targetDomain) => {
 	try {
 		console.log(`Scraping: ${url}`);
@@ -24,7 +19,6 @@ const scrapePageContent = async (url, targetDomain) => {
 			return null;
 		}
 
-		// Ensure content is HTML before parsing
 		const contentType = response.headers["content-type"];
 		if (!contentType || !contentType.includes("text/html")) {
 			console.warn(`Skipping non-HTML content at ${url}: ${contentType}`);
@@ -33,44 +27,36 @@ const scrapePageContent = async (url, targetDomain) => {
 
 		const $ = cheerio.load(response.data);
 
-		// Extract page title
-		const title = $("title").text().trim() || url; // Use URL as fallback title
+		const title = $("title").text().trim() || url;
 
-		// Remove unnecessary elements
 		$(
 			"script, style, noscript, iframe, img, svg, canvas, button, header, footer, nav, aside"
-		).remove(); // More aggressive removal
+		).remove();
 
-		// Extract text content - prioritize main content areas
 		let pageText = "";
 		const mainContent = $(
-			'main, article, #content, .content, .main, [role="main"], .post-content, .entry-content' // Added common blog content classes
+			'main, article, #content, .content, .main, [role="main"], .post-content, .entry-content'
 		);
 
 		if (mainContent.length > 0) {
 			pageText = mainContent.text();
 		} else {
-			// Fallback to body if specific main areas aren't found
 			pageText = $("body").text();
 		}
 
 		const cleanedContent = cleanContent(pageText);
 
-		// Extract relevant links from the *entire* page (before removing nav/footer etc if needed)
-		const links = new Set(); // Use Set to avoid duplicate links on the same page
+		const links = new Set();
 		$("a[href]").each((i, el) => {
 			const link = $(el).attr("href");
 			if (link) {
 				try {
-					const absoluteUrl = new URL(link, url).href; // Resolve relative URLs
-					// Clean URL (remove hash, trailing slash)
+					const absoluteUrl = new URL(link, url).href;
 					const cleanedUrl = absoluteUrl.split("#")[0].replace(/\/$/, "");
-					// Check if it belongs to the target domain
 					if (new URL(cleanedUrl).hostname === targetDomain) {
 						links.add(cleanedUrl);
 					}
 				} catch (e) {
-					// Ignore invalid URLs
 					// console.warn(`Ignoring invalid link: ${link} on page ${url}`);
 				}
 			}
@@ -85,51 +71,92 @@ const scrapePageContent = async (url, targetDomain) => {
 		} else {
 			console.error(`Error scraping page ${url}:`, error.message);
 		}
-		return null; // Return null on error for this page
+		return null;
 	}
 };
 
-// Clean content helper function
 const cleanContent = (text) => {
 	if (!text) return "";
 	return text
-		.replace(/<[^>]*>/g, " ") // Remove any remaining HTML tags just in case
-		.replace(/\s+/g, " ") // Replace multiple spaces/newlines with single space
-		.replace(/\t+/g, " ") // Replace tabs with spaces
+		.replace(/<[^>]*>/g, " ")
+		.replace(/\s+/g, " ")
+		.replace(/\t+/g, " ")
 		.trim();
 };
 
-// Main function to scrape multiple pages of a website
-const scrapeWebsite = async (baseUrl) => {
+const scrapeWebsite = async (initialBaseUrl) => {
+	if (
+		!initialBaseUrl ||
+		typeof initialBaseUrl !== "string" ||
+		initialBaseUrl.trim() === ""
+	) {
+		const errorMsg = "Invalid baseUrl: Must be a non-empty string.";
+		console.error(errorMsg, "Received:", initialBaseUrl);
+		throw new Error(errorMsg);
+	}
+
+	let baseUrl = initialBaseUrl.trim();
+
+	if (baseUrl.startsWith("//")) {
+		baseUrl = "https:" + baseUrl;
+		console.log(`Normalized protocol-relative baseUrl to: ${baseUrl}`);
+	} else if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(baseUrl)) {
+		baseUrl = "https://" + baseUrl;
+		console.log(`Scheme missing. Normalized baseUrl to: ${baseUrl}`);
+	}
+
+	let parsedBaseUrl;
+	try {
+		parsedBaseUrl = new URL(baseUrl);
+		if (
+			parsedBaseUrl.protocol !== "http:" &&
+			parsedBaseUrl.protocol !== "https:"
+		) {
+			throw new Error(
+				`Unsupported protocol: ${parsedBaseUrl.protocol}. Only http and https are supported by this scraper.`
+			);
+		}
+	} catch (e) {
+		const errorMsg = `The baseUrl "${baseUrl}" (derived from input "${initialBaseUrl}") is invalid or uses an unsupported protocol: ${e.message}`;
+		console.error(errorMsg);
+		throw new Error(errorMsg);
+	}
+
 	const visitedUrls = new Set();
-	const urlsToVisit = [baseUrl];
+	const urlsToVisit = [parsedBaseUrl.href];
 	let allContent = "";
 	let pageCount = 0;
 	let siteTitle = "Untitled Site";
 
 	try {
-		const base = new URL(baseUrl);
-		const targetDomain = base.hostname;
-		console.log(`Starting crawl for domain: ${targetDomain}`);
+		const targetDomain = parsedBaseUrl.hostname;
+		console.log(
+			`Starting crawl for domain: ${targetDomain} (from ${parsedBaseUrl.href})`
+		);
 
 		while (urlsToVisit.length > 0 && pageCount < MAX_PAGES_TO_SCRAPE) {
-			const currentUrl = urlsToVisit.shift(); // Get the next URL (FIFO queue)
+			const currentUrl = urlsToVisit.shift();
 
-			// Clean URL before checking/adding
 			const cleanCurrentUrl = currentUrl.split("#")[0].replace(/\/$/, "");
 
 			if (visitedUrls.has(cleanCurrentUrl)) {
-				continue; // Skip already visited
+				continue;
 			}
 
-			// Check domain again (important for redirects)
+			let currentUrlHostname;
 			try {
-				if (new URL(cleanCurrentUrl).hostname !== targetDomain) {
-					console.log(`Skipping external link: ${cleanCurrentUrl}`);
-					continue;
-				}
+				currentUrlHostname = new URL(cleanCurrentUrl).hostname;
 			} catch (e) {
-				console.warn(`Skipping invalid URL format: ${cleanCurrentUrl}`);
+				console.warn(
+					`Skipping invalid URL format found in queue: ${cleanCurrentUrl} (Error: ${e.message})`
+				);
+				continue;
+			}
+
+			if (currentUrlHostname !== targetDomain) {
+				console.log(
+					`Skipping external link: ${cleanCurrentUrl} (Domain: ${currentUrlHostname}, Target: ${targetDomain})`
+				);
 				continue;
 			}
 
@@ -139,33 +166,30 @@ const scrapeWebsite = async (baseUrl) => {
 			const pageData = await scrapePageContent(cleanCurrentUrl, targetDomain);
 
 			if (pageData) {
-				// Use the title of the first successfully scraped page as the site title
 				if (pageCount === 1 && pageData.title !== cleanCurrentUrl) {
-					// Avoid using URL as title if possible
 					siteTitle = pageData.title;
 				}
 
-				// Append content with clear separators
 				allContent += `\n\n--- Page: ${pageData.title} (${cleanCurrentUrl}) ---\n\n${pageData.content}`;
 
-				// Add new, unvisited internal links to the queue
 				pageData.links.forEach((link) => {
 					const cleanLink = link.split("#")[0].replace(/\/$/, "");
-					if (
-						!visitedUrls.has(cleanLink) &&
-						new URL(cleanLink).hostname === targetDomain
-					) {
-						urlsToVisit.push(cleanLink); // Add to the end of the queue
+					try {
+						if (
+							!visitedUrls.has(cleanLink) &&
+							new URL(cleanLink).hostname === targetDomain
+						) {
+							urlsToVisit.push(cleanLink);
+						}
+					} catch (e) {
+						console.warn(
+							`Ignoring invalid discovered link: ${cleanLink} (Error: ${e.message})`
+						);
 					}
 				});
 			} else {
-				// Reduce page count if scrape failed significantly (optional)
-				// pageCount--; // Uncomment if you only want to count *successful* scrapes towards the limit
 				console.warn(`Failed to get data for ${cleanCurrentUrl}, skipping.`);
 			}
-
-			// Optional delay to be polite to the server
-			// await new Promise(resolve => setTimeout(resolve, 500)); // 500ms delay
 		}
 
 		console.log(
@@ -174,13 +198,13 @@ const scrapeWebsite = async (baseUrl) => {
 
 		return { title: siteTitle, content: allContent.trim() };
 	} catch (error) {
-		console.error("Critical error during website crawl:", error);
-		throw new Error(`Failed to complete website crawl: ${error.message}`);
+		console.error("Critical error during website crawl:", error.message);
+		throw new Error(
+			`Failed to complete website crawl for "${initialBaseUrl}": ${error.message}`
+		);
 	}
 };
 
 export default {
-	scrapeWebsite, // This now crawls the site
-	// scrapePageContent // You could also export this if needed elsewhere
+	scrapeWebsite,
 };
-// --- END OF FILE scraper.js ---

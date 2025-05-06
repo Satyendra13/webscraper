@@ -3,21 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import { Search, AlertCircle } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { scrapeWebsite } from '../services/api';
+import { validateURL } from '../utils';
 
 const URLForm: React.FC = () => {
   const [url, setUrl] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const navigate = useNavigate();
-
-  const validateURL = (input: string) => {
-    try {
-      new URL(input);
-      return true;
-    } catch (err) {
-      return false;
-    }
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -32,7 +24,7 @@ const URLForm: React.FC = () => {
     }
     
     if (!validateURL(url)) {
-      setError('Please enter a valid URL');
+      setError('Please enter a valid URL and only educational website URL.');
       return;
     }
     
@@ -46,6 +38,7 @@ const URLForm: React.FC = () => {
       // Navigate to results page with the ID
       navigate(`/results/${response.data._id}`);
     } catch (err: any) {
+      console.log(err)
       // Handle errors
       if (err.response && err.response.data && err.response.data.message) {
         setError(err.response.data.message);

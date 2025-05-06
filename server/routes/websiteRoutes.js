@@ -35,7 +35,6 @@ router.get("/", async (req, res, next) => {
 router.post("/scrape", async (req, res, next) => {
 	try {
 		const { url } = req.body;
-
 		if (!url) {
 			return res.status(400).json({ message: "URL is required" });
 		}

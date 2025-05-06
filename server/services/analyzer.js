@@ -1,14 +1,12 @@
-// --- START OF FILE analyzer.js ---
-
 import natural from "natural";
-import huggingface from "./huggingface.js"; // Assuming this still exists for summary/keywords
+import dotenv from "dotenv";
+dotenv.config();
 import {
 	GoogleGenerativeAI,
 	HarmCategory,
 	HarmBlockThreshold,
 } from "@google/generative-ai";
 
-// --- Existing Tokenizer and Stopwords ---
 const tokenizer = new natural.WordTokenizer();
 const stopwords = [
 	"a",
@@ -135,31 +133,28 @@ const stopwords = [
 	"yourself",
 	"yourselves",
 ];
-// --- End of Stopwords ---
 
-// --- Google Gemini Setup ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 let genAI;
 let geminiModel;
 
 if (GEMINI_API_KEY) {
 	genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-	geminiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" }); // Or choose another suitable model
-	console.log("Gemini AI initialized.");
+	geminiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
+	console.log("Gemini AI initialized with model gemini-1.5-flash-latest.");
 } else {
 	console.warn(
-		"GEMINI_API_KEY not found in environment variables. Gemini querying will be disabled."
+		"GEMINI_API_KEY not found in environment variables. Gemini querying will be disabled, and fallback search will be used."
 	);
 }
 
 const generationConfig = {
-	temperature: 0.5, // Adjust creativity/factuality
+	temperature: 0.5,
 	topK: 1,
 	topP: 1,
-	maxOutputTokens: 2048, // Adjust as needed
+	maxOutputTokens: 2048,
 };
 
-// Safety settings to prevent harmful content generation
 const safetySettings = [
 	{
 		category: HarmCategory.HARM_CATEGORY_HARASSMENT,
@@ -178,115 +173,65 @@ const safetySettings = [
 		threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
 	},
 ];
-// --- End of Gemini Setup ---
 
-// Analyze content to extract summary and keywords (keeps HuggingFace integration)
-const analyzeContent = async (content) => {
+const analyzeContent = (content) => {
 	try {
-		// Try to get AI-powered summary first
-		let summary = "Could not generate summary."; // Default value
-		try {
-			const hfSummary = await huggingface.summarizeContent(content);
-			if (hfSummary && !hfSummary.error) {
-				summary = hfSummary.summary;
-			} else {
-				summary = generateSummary(content); // Fallback
-			}
-		} catch (error) {
-			console.warn(
-				"HuggingFace summarization failed, using fallback:",
-				error.message
-			);
-			summary = generateSummary(content); // Fallback
-		}
-
-		// Try to get AI-powered keywords first
-		let keywords = []; // Default value
-		try {
-			const hfKeywords = await huggingface.extractKeywords(content);
-			if (hfKeywords && !hfKeywords.error && hfKeywords.keywords) {
-				keywords = hfKeywords.keywords.map((k) => ({
-					word: k.word,
-					// Use score if available, otherwise default or mark differently
-					count: k.score ? Math.round(k.score * 100) : "N/A",
-				}));
-			} else {
-				keywords = extractKeywords(content); // Fallback
-			}
-		} catch (error) {
-			console.warn(
-				"HuggingFace keyword extraction failed, using fallback:",
-				error.message
-			);
-			keywords = extractKeywords(content); // Fallback
-		}
-
+		const summary = generateSummary(content);
+		const keywords = extractKeywords(content);
 		return { summary, keywords };
 	} catch (error) {
-		console.error("Error analyzing content:", error);
-		// Return default structure on failure
-		return { summary: "Error during analysis.", keywords: [] };
+		console.error("Error analyzing content with local methods:", error);
+		return { summary: "Error during local content analysis.", keywords: [] };
 	}
 };
 
-// Traditional summary generation (fallback)
 const generateSummary = (content) => {
-	if (!content) return "No content provided for summary.";
-	const sentences = content.match(/[^.!?]+[.!?]+\s*/g) || []; // Added \s* for better sentence splitting
+	if (!content || typeof content !== "string")
+		return "No content provided for summary.";
+	const sentences = content.match(/[^.!?]+[.!?]+\s*/g) || [];
 	if (sentences.length === 0) {
-		// Handle case where no sentences are found (maybe just a short string)
 		return content.substring(0, 300) + (content.length > 300 ? "..." : "");
 	}
 
-	let summary = sentences.slice(0, 3).join(""); // Join directly
+	let summary = sentences.slice(0, 3).join("");
 
-	// If summary is too short, add more sentences
 	if (summary.length < 200 && sentences.length > 3) {
 		summary = sentences.slice(0, Math.min(5, sentences.length)).join("");
 	}
 
-	// If still too short
-	if (summary.length < 100) {
-		// Take beginning of content as last resort
+	if (summary.length < 100 && content.length > 0) {
 		summary = content.substring(0, 300) + (content.length > 300 ? "..." : "");
 	}
 
-	return summary.trim(); // Trim final result
+	return summary.trim();
 };
 
-// Traditional keyword extraction (fallback)
 const extractKeywords = (content) => {
-	if (!content) return [];
-	// Tokenize the content
+	if (!content || typeof content !== "string") return [];
 	const tokens = tokenizer.tokenize(content.toLowerCase());
 	if (!tokens) return [];
 
-	// Remove stopwords and non-alphabetic words
 	const filteredTokens = tokens.filter(
 		(token) =>
 			token.length > 2 && !stopwords.includes(token) && /^[a-z]+$/.test(token)
 	);
 
-	// Count word frequencies
 	const wordFrequencies = {};
 	filteredTokens.forEach((token) => {
 		wordFrequencies[token] = (wordFrequencies[token] || 0) + 1;
 	});
 
-	// Convert to array and sort by frequency
 	const keywords = Object.entries(wordFrequencies)
 		.map(([word, count]) => ({ word, count }))
 		.sort((a, b) => b.count - a.count)
-		.slice(0, 30); // Get top 30 keywords
+		.slice(0, 30);
 
 	return keywords;
 };
 
-// Answer queries using Google Gemini
 const queryContent = async (query, content, summary, keywords) => {
 	const lowerQuery = query.toLowerCase();
 
-	// Handle specific requests directly
 	if (lowerQuery.includes("summary") || lowerQuery.includes("summarize")) {
 		return summary || "No summary available.";
 	}
@@ -302,15 +247,16 @@ const queryContent = async (query, content, summary, keywords) => {
 		}
 	}
 
-	// Use Gemini for general queries if available
 	if (!geminiModel) {
-		console.warn("Gemini model not available. Falling back to simple search.");
-		return searchContent(query, content); // Fallback if Gemini isn't configured
+		console.warn(
+			"Gemini model not available. Falling back to simple search for query:",
+			query
+		);
+		return searchContent(query, content);
 	}
 
 	try {
-		console.log("Querying Gemini...");
-		// Construct a clear prompt for Gemini
+		console.log("Querying Gemini for:", query);
 		const prompt = `Based ONLY on the following text content, answer the user's question. Do not use any external knowledge. If the answer cannot be found in the text, clearly state that the information is not available in the provided content.
 
         TEXT CONTENT:
@@ -331,79 +277,65 @@ const queryContent = async (query, content, summary, keywords) => {
 		if (!text || response.promptFeedback?.blockReason) {
 			console.warn(
 				"Gemini response blocked or empty. Reason:",
-				response.promptFeedback?.blockReason || "Empty Response"
+				response.promptFeedback?.blockReason || "Empty Response",
+				"Falling back."
 			);
-			// Fallback if Gemini response is blocked or empty
 			return searchContent(query, content);
 		}
 
 		console.log("Gemini response received.");
 		return text;
 	} catch (error) {
-		console.error("Error querying Gemini:", error);
-		// Fallback to simple search on Gemini API error
-		console.log("Falling back to simple search due to Gemini error.");
+		console.error("Error querying Gemini:", error.message);
+		console.log(
+			"Falling back to simple search due to Gemini error for query:",
+			query
+		);
 		return searchContent(query, content);
 	}
 };
 
-// Generate response for keyword-related queries
 const generateKeywordResponse = (query, keywords) => {
 	if (!keywords || keywords.length === 0) return "No keywords extracted.";
-	// Check if asking for specific keyword
 	for (const { word, count } of keywords) {
-		// Make sure word is defined before checking includes
 		if (word && query.includes(word)) {
-			return `The keyword "${word}" was identified in the content${
-				count !== "N/A" ? ` with a score/frequency of ${count}` : ""
-			}.`;
+			return `The keyword "${word}" appears ${count} times in the content.`;
 		}
 	}
-
-	// Return top keywords
 	const topKeywords = keywords
 		.slice(0, 10)
-		.map((k) => `${k.word}${k.count !== "N/A" ? ` (${k.count})` : ""}`)
+		.map((k) => `${k.word} (${k.count})`)
 		.join(", ");
-
 	return `The most frequent keywords identified are: ${topKeywords || "None"}.`;
 };
 
-// Search content for relevant information (fallback)
 const searchContent = (query, content) => {
-	if (!content) return "No content available to search.";
-	// Split content into sentences
+	if (!content || typeof content !== "string")
+		return "No content available to search.";
 	const sentences = content.match(/[^.!?]+[.!?]+\s*/g) || [];
 	if (sentences.length === 0)
 		return "Could not parse content into sentences for searching.";
 
-	// Simple search: find sentences containing query terms
-	// Filter out short/common words from query for better matching
 	const queryWords = query
 		.toLowerCase()
 		.split(" ")
 		.filter((w) => w.length > 3 && !stopwords.includes(w));
 	if (queryWords.length === 0)
-		return "Please provide more specific search terms."; // Handle very generic queries
+		return "Please provide more specific search terms for local search.";
 
 	const relevantSentences = sentences.filter((sentence) => {
 		const lowerSentence = sentence.toLowerCase();
-		// Check if *all* significant query words are in the sentence for higher relevance (optional)
-		// return queryWords.every((word) => lowerSentence.includes(word));
-		// Or keep the original 'some' logic:
 		return queryWords.some((word) => lowerSentence.includes(word));
 	});
 
 	if (relevantSentences.length > 0) {
-		// Return up to 3 relevant sentences
 		return relevantSentences.slice(0, 3).join(" ").trim();
 	}
 
-	return "I couldn't find specific information related to your query in the content.";
+	return "I couldn't find specific information related to your query in the provided content using local search.";
 };
 
 export default {
 	analyzeContent,
 	queryContent,
 };
-// --- END OF FILE analyzer.js ---
