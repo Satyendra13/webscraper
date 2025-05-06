@@ -47,6 +47,7 @@ const educationalTlds = new Set([
 	".ac.nz",
 	".edu.cn",
 	".edu.hk",
+	".nic.in",
 	".edu.tw",
 	".edu.sg",
 	".edu.in",
