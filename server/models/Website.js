@@ -1,45 +1,40 @@
-import mongoose from "mongoose";
-
-const keywordSchema = new mongoose.Schema({
-	word: {
-		type: String,
-		required: true,
-	},
-	count: {
-		type: Number,
-		required: true,
-	},
-});
+import mongoose from 'mongoose';
 
 const websiteSchema = new mongoose.Schema({
-	url: {
-		type: String,
-		required: true,
-		trim: true,
+	url: { type: String, required: true, unique: true, trim: true, index: true },
+	title: { type: String, required: true, trim: true },
+	content: { type: String, required: true },
+	summary: { type: String, default: '' },
+	keywords: [{ word: String, count: Number }],
+	sentences: [{ text: String, index: Number, wordCount: Number }],
+	stats: {
+		htmlPages: { type: Number, default: 0 },
+		pdfDocuments: { type: Number, default: 0 },
+		totalPages: { type: Number, default: 0 },
+		wordCount: { type: Number, default: 0 },
+		characterCount: { type: Number, default: 0 },
+		sentenceCount: { type: Number, default: 0 }
 	},
-	title: {
-		type: String,
-		required: true,
-		trim: true,
-	},
-	content: {
-		type: String,
-		required: true,
-	},
-	summary: {
-		type: String,
-		required: true,
-	},
-	keywords: [keywordSchema],
-	createdAt: {
-		type: Date,
-		default: Date.now,
-	},
+	metadata: {
+		scrapingDuration: Number,
+		lastScrapedAt: { type: Date, default: Date.now },
+		scrapingErrors: [{ url: String, error: String }],
+		contentType: [String]
+	}
+}, { timestamps: true });
+
+websiteSchema.index({ title: 'text', 'keywords.word': 'text' });
+
+websiteSchema.pre('save', function (next) {
+	if (this.isNew || this.isModified('stats')) {
+		const contentTypes = [];
+		if (this.stats.htmlPages > 0) contentTypes.push('html');
+		if (this.stats.pdfDocuments > 0) contentTypes.push('pdf');
+		this.metadata.contentType = contentTypes;
+	}
+	this.metadata.lastScrapedAt = new Date();
+	next();
 });
 
-// Create a compound index for faster queries and to ensure uniqueness
-websiteSchema.index({ url: 1 });
-
-const Website = mongoose.model("Website", websiteSchema);
-
+const Website = mongoose.model('Website', websiteSchema);
 export default Website;

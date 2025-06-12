@@ -1,5 +1,5 @@
 import axios from "axios";
-// const API_URL = 'http://localhost:5000/api';
+// const API_URL = "http://localhost:5000/api";
 const API_URL = "https://api-web-scraper.onrender.com/api";
 
 export const scrapeWebsite = async (url: string) => {
@@ -11,5 +11,5 @@ export const getWebsite = async (id: string) => {
 };
 
 export const queryWebsite = async (id: string, query: string) => {
-  return axios.post(`${API_URL}/websites/${id}/query`, { query });
+	return axios.post(`${API_URL}/websites/${id}/query`, { query });
 };

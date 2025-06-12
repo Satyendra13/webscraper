@@ -1,210 +1,208 @@
 import * as cheerio from "cheerio";
 import axios from "axios";
+import { fileTypeFromBuffer } from "file-type";
+import pLimit from "p-limit";
+import analyzer from "./analyzer.js";
+import mammoth from "mammoth"; // Import the new .docx parser
 
-const MAX_PAGES_TO_SCRAPE = 50;
-const REQUEST_TIMEOUT = 100000;
-const USER_AGENT =
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36";
+// --- Logger Utility ---
+const colors = { reset: "\x1b[0m", blue: "\x1b[34m", green: "\x1b[32m", red: "\x1b[31m", yellow: "\x1b[33m" };
+const logger = {
+	info: (message) => console.log(`${colors.blue}[INFO]${colors.reset} ${message}`),
+	success: (message) => console.log(`${colors.green}[SUCCESS]${colors.reset} ${message}`),
+	error: (message) => console.error(`${colors.red}[ERROR]${colors.reset} ${message}`),
+	warn: (message) => console.log(`${colors.yellow}[WARN]${colors.reset} ${message}`),
+};
 
-const scrapePageContent = async (url, targetDomain) => {
+// --- Configuration ---
+const MAX_PAGES_TO_SCRAPE = 2000;
+const REQUEST_TIMEOUT = 30000;
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36";
+const CONCURRENT_REQUESTS = 50;
+const htmlLimit = pLimit(CONCURRENT_REQUESTS);
+
+const cleanContent = (text) => text?.replace(/\s+/g, " ").trim() || "";
+
+// =========================================================================
+//  NEW: Stricter URL Filtering Logic (Now includes docx as a valid type)
+// =========================================================================
+const BANNED_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'mp4', 'mov', 'avi', 'wmv', 'zip', 'rar', 'xml', 'css', 'js', 'ico'];
+const BANNED_PATH_SEGMENTS = ['/gallery/', '/portfolio/', 'galleries-category', '/media/', '/assets/', '/images/', '/videos/'];
+const VALID_DOC_EXTENSIONS = ['pdf', 'docx'];
+
+const isValidUrl = (url) => {
 	try {
-		console.log(`Scraping: ${url}`);
+		const lowerCaseUrl = url.toLowerCase();
+		const extension = lowerCaseUrl.split('.').pop().split('?')[0];
+		if (BANNED_EXTENSIONS.includes(extension)) return false;
+		for (const segment of BANNED_PATH_SEGMENTS) {
+			if (lowerCaseUrl.includes(segment)) return false;
+		}
+		return true;
+	} catch (e) { return false; }
+};
+
+const getUrlType = (url) => {
+	const lowerCaseUrl = url.toLowerCase();
+	for (const ext of VALID_DOC_EXTENSIONS) {
+		if (lowerCaseUrl.endsWith(`.${ext}`)) return ext;
+	}
+	return 'html';
+};
+
+
+const scrapePageOrDoc = async (url, targetDomain) => {
+	logger.info(`Processing -> ${url}`);
+	try {
+		const urlType = getUrlType(url);
+
+		// Handle PDF and DOCX documents by downloading them directly
+		if (urlType === 'pdf' || urlType === 'docx') {
+			const response = await axios.get(url, { responseType: 'arraybuffer', headers: { "User-Agent": USER_AGENT }, timeout: REQUEST_TIMEOUT });
+			let content = "";
+			let success = false;
+
+			if (urlType === 'pdf') {
+				const pdfResult = await analyzer.processPdfWithOcr(response.data);
+				if (pdfResult) {
+					content = pdfResult;
+					success = true;
+				}
+			} else if (urlType === 'docx') {
+				const docxResult = await mammoth.extractRawText({ buffer: response.data });
+				content = cleanContent(docxResult.value);
+				success = true;
+			}
+
+			if (success) logger.success(`Successfully processed document: ${url}`);
+			else logger.error(`Failed to extract text from document: ${url}`);
+
+			return {
+				title: `${urlType.toUpperCase()}: ${url.split('/').pop()}`,
+				content: content,
+				type: urlType,
+				url,
+				success
+			};
+		}
+
+		// --- Handle HTML pages ---
 		const response = await axios.get(url, {
-			headers: { "User-Agent": USER_AGENT },
-			timeout: REQUEST_TIMEOUT,
+			headers: { "User-Agent": USER_AGENT }, timeout: REQUEST_TIMEOUT,
+			responseType: 'arraybuffer', maxRedirects: 5,
 		});
 
-		if (response.status !== 200) {
-			console.warn(`Failed to fetch ${url}: Status ${response.status}`);
-			return null;
+		const buffer = Buffer.from(response.data);
+		const fileType = await fileTypeFromBuffer(buffer);
+		if (fileType?.mime === 'application/pdf') {
+			const pdfText = await analyzer.processPdfWithOcr(buffer);
+			return { type: 'pdf', content: pdfText, url, success: !!pdfText };
+		}
+		// Could add a check for docx filetype here as well if needed
+
+		const contentTypeHeader = response.headers['content-type'];
+		if (!contentTypeHeader || !contentTypeHeader.includes('text/html')) {
+			logger.warn(`Skipping non-HTML content at ${url} (Type: ${contentTypeHeader || 'unknown'})`);
+			return { success: false, error: 'Non-HTML content type' };
 		}
 
-		const contentType = response.headers["content-type"];
-		if (!contentType || !contentType.includes("text/html")) {
-			console.warn(`Skipping non-HTML content at ${url}: ${contentType}`);
-			return null;
-		}
-
-		const $ = cheerio.load(response.data);
-
+		const htmlContent = buffer.toString('utf8');
+		const $ = cheerio.load(htmlContent);
 		const title = $("title").text().trim() || url;
-
-		$(
-			"script, style, noscript, iframe, img, svg, canvas, button, header, footer, nav, aside"
-		).remove();
-
-		let pageText = "";
-		const mainContent = $(
-			'main, article, #content, .content, .main, [role="main"], .post-content, .entry-content'
-		);
-
-		if (mainContent.length > 0) {
-			pageText = mainContent.text();
-		} else {
-			pageText = $("body").text();
-		}
-
-		const cleanedContent = cleanContent(pageText);
-
 		const links = new Set();
-		$("a[href]").each((i, el) => {
+
+		$("body a[href]").each((_, el) => {
 			const link = $(el).attr("href");
-			if (link) {
+			if (link && link.trim() && !link.startsWith('#') && !link.startsWith('javascript:')) {
 				try {
 					const absoluteUrl = new URL(link, url).href;
 					const cleanedUrl = absoluteUrl.split("#")[0].replace(/\/$/, "");
 					if (new URL(cleanedUrl).hostname === targetDomain) {
 						links.add(cleanedUrl);
 					}
-				} catch (e) {
-					// console.warn(`Ignoring invalid link: ${link} on page ${url}`);
-				}
+				} catch (e) { /* Ignore */ }
 			}
 		});
 
-		return { title, content: cleanedContent, links: Array.from(links) };
+		$("script, style, noscript, iframe, svg, canvas, header, footer, nav, aside, form, img").remove();
+		const pageText = cleanContent($("body").text());
+		logger.success(`Successfully scraped HTML: ${url}`);
+		return {
+			title, content: pageText,
+			links: Array.from(links),
+			type: 'html', url, success: true
+		};
 	} catch (error) {
-		if (axios.isAxiosError(error)) {
-			console.error(
-				`Axios error scraping ${url}: ${error.message} (Status: ${error.response?.status})`
-			);
-		} else {
-			console.error(`Error scraping page ${url}:`, error.message);
-		}
-		return null;
+		const errorMessage = error.response ? `HTTP ${error.response.status}` : error.message;
+		logger.error(`Failed to process ${url}: ${errorMessage}`);
+		return { success: false, error: errorMessage, url };
 	}
-};
-
-const cleanContent = (text) => {
-	if (!text) return "";
-	return text
-		.replace(/<[^>]*>/g, " ")
-		.replace(/\s+/g, " ")
-		.replace(/\t+/g, " ")
-		.trim();
 };
 
 const scrapeWebsite = async (initialBaseUrl) => {
-	if (
-		!initialBaseUrl ||
-		typeof initialBaseUrl !== "string" ||
-		initialBaseUrl.trim() === ""
-	) {
-		const errorMsg = "Invalid baseUrl: Must be a non-empty string.";
-		console.error(errorMsg, "Received:", initialBaseUrl);
-		throw new Error(errorMsg);
-	}
-
+	if (!initialBaseUrl) throw new Error("URL is required.");
 	let baseUrl = initialBaseUrl.trim();
+	if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(baseUrl)) baseUrl = "https://" + baseUrl;
+	const parsedBaseUrl = new URL(baseUrl);
+	const targetDomain = parsedBaseUrl.hostname;
+	const startTime = Date.now();
 
-	if (baseUrl.startsWith("//")) {
-		baseUrl = "https:" + baseUrl;
-		console.log(`Normalized protocol-relative baseUrl to: ${baseUrl}`);
-	} else if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(baseUrl)) {
-		baseUrl = "https://" + baseUrl;
-		console.log(`Scheme missing. Normalized baseUrl to: ${baseUrl}`);
-	}
+	const initialUrl = parsedBaseUrl.href.replace(/\/$/, "");
+	const queue = [initialUrl];
+	const visited = new Set([initialUrl]);
 
-	let parsedBaseUrl;
-	try {
-		parsedBaseUrl = new URL(baseUrl);
-		if (
-			parsedBaseUrl.protocol !== "http:" &&
-			parsedBaseUrl.protocol !== "https:"
-		) {
-			throw new Error(
-				`Unsupported protocol: ${parsedBaseUrl.protocol}. Only http and https are supported by this scraper.`
-			);
-		}
-	} catch (e) {
-		const errorMsg = `The baseUrl "${baseUrl}" (derived from input "${initialBaseUrl}") is invalid or uses an unsupported protocol: ${e.message}`;
-		console.error(errorMsg);
-		throw new Error(errorMsg);
-	}
-
-	const visitedUrls = new Set();
-	const urlsToVisit = [parsedBaseUrl.href];
 	let allContent = "";
-	let pageCount = 0;
 	let siteTitle = "Untitled Site";
+	const scrapingErrors = [];
+	let pagesScraped = 0, pdfsScraped = 0, docxScraped = 0;
 
-	try {
-		const targetDomain = parsedBaseUrl.hostname;
-		console.log(
-			`Starting crawl for domain: ${targetDomain} (from ${parsedBaseUrl.href})`
-		);
+	logger.info(`Crawl Start for ${targetDomain}...`);
 
-		while (urlsToVisit.length > 0 && pageCount < MAX_PAGES_TO_SCRAPE) {
-			const currentUrl = urlsToVisit.shift();
+	while (queue.length > 0 && visited.size < MAX_PAGES_TO_SCRAPE) {
+		const batch = queue.splice(0, CONCURRENT_REQUESTS);
+		logger.info(`Processing batch of ${batch.length}. Visited: ${visited.size}. Queue: ${queue.length}.`);
 
-			const cleanCurrentUrl = currentUrl.split("#")[0].replace(/\/$/, "");
+		const promises = batch.map(url => htmlLimit(() => scrapePageOrDoc(url, targetDomain)));
+		const batchResults = await Promise.allSettled(promises);
 
-			if (visitedUrls.has(cleanCurrentUrl)) {
+		for (const result of batchResults) {
+			if (result.status === 'rejected' || !result.value?.success) {
+				if (result.value?.url) scrapingErrors.push({ url: result.value.url, error: result.value.error });
 				continue;
 			}
 
-			let currentUrlHostname;
-			try {
-				currentUrlHostname = new URL(cleanCurrentUrl).hostname;
-			} catch (e) {
-				console.warn(
-					`Skipping invalid URL format found in queue: ${cleanCurrentUrl} (Error: ${e.message})`
-				);
-				continue;
+			const pageData = result.value;
+			if (pageData.content) {
+				if (pageData.type === 'pdf') pdfsScraped++;
+				if (pageData.type === 'docx') docxScraped++;
+				if (pageData.type === 'html') pagesScraped++;
+
+				if (pagesScraped === 1 && !siteTitle) siteTitle = pageData.title;
+
+				allContent += `\n\n--- START OF CONTENT FROM ${pageData.type.toUpperCase()}: ${pageData.url} ---\n${pageData.content}\n--- END OF CONTENT FROM ${pageData.type.toUpperCase()}: ${pageData.url} ---\n`;
 			}
 
-			if (currentUrlHostname !== targetDomain) {
-				console.log(
-					`Skipping external link: ${cleanCurrentUrl} (Domain: ${currentUrlHostname}, Target: ${targetDomain})`
-				);
-				continue;
-			}
-
-			visitedUrls.add(cleanCurrentUrl);
-			pageCount++;
-
-			const pageData = await scrapePageContent(cleanCurrentUrl, targetDomain);
-
-			if (pageData) {
-				if (pageCount === 1 && pageData.title !== cleanCurrentUrl) {
-					siteTitle = pageData.title;
-				}
-
-				allContent += `\n\n--- Page: ${pageData.title} (${cleanCurrentUrl}) ---\n\n${pageData.content}`;
-
-				pageData.links.forEach((link) => {
-					const cleanLink = link.split("#")[0].replace(/\/$/, "");
-					try {
-						if (
-							!visitedUrls.has(cleanLink) &&
-							new URL(cleanLink).hostname === targetDomain
-						) {
-							urlsToVisit.push(cleanLink);
-						}
-					} catch (e) {
-						console.warn(
-							`Ignoring invalid discovered link: ${cleanLink} (Error: ${e.message})`
-						);
+			if (pageData.type === 'html' && pageData.links) {
+				for (const link of pageData.links) {
+					if (!visited.has(link) && isValidUrl(link)) {
+						visited.add(link);
+						queue.push(link);
 					}
-				});
-			} else {
-				console.warn(`Failed to get data for ${cleanCurrentUrl}, skipping.`);
+				}
 			}
 		}
-
-		console.log(
-			`Finished crawling. Scraped ${pageCount} pages. Total URLs visited/attempted: ${visitedUrls.size}`
-		);
-
-		return { title: siteTitle, content: allContent.trim() };
-	} catch (error) {
-		console.error("Critical error during website crawl:", error.message);
-		throw new Error(
-			`Failed to complete website crawl for "${initialBaseUrl}": ${error.message}`
-		);
 	}
+
+	const duration = Date.now() - startTime;
+	logger.info("-------------------- CRAWL COMPLETE --------------------");
+	logger.success(`Completed in ${(duration / 1000).toFixed(2)}s. Total unique links found: ${visited.size}.`);
+	logger.info(`HTML: ${pagesScraped}, PDFs: ${pdfsScraped}, DOCX: ${docxScraped}, Errors: ${scrapingErrors.length}`);
+
+	return {
+		url: parsedBaseUrl.href, title: siteTitle, content: allContent,
+		stats: { htmlPages: pagesScraped, pdfDocuments: pdfsScraped, docxDocuments: docxScraped, totalPages: visited.size, scrapingDuration: duration, },
+		scrapingErrors: scrapingErrors
+	};
 };
 
-export default {
-	scrapeWebsite,
-};
+export default { scrapeWebsite };
