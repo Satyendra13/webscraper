@@ -15,7 +15,7 @@ const logger = {
 };
 
 // --- Configuration ---
-const MAX_PAGES_TO_SCRAPE = 2000;
+const MAX_PAGES_TO_SCRAPE = 5000;
 const REQUEST_TIMEOUT = 30000;
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36";
 const CONCURRENT_REQUESTS = 50;
@@ -27,7 +27,7 @@ const cleanContent = (text) => text?.replace(/\s+/g, " ").trim() || "";
 //  NEW: Stricter URL Filtering Logic (Now includes docx as a valid type)
 // =========================================================================
 const BANNED_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'mp4', 'mov', 'avi', 'wmv', 'zip', 'rar', 'xml', 'css', 'js', 'ico'];
-const BANNED_PATH_SEGMENTS = ['/gallery/', '/portfolio/', 'galleries-category', '/media/', '/assets/', '/images/', '/videos/'];
+const BANNED_PATH_SEGMENTS = ['/gallery/', '/portfolio/', '/jobs/', '/paper/', '/photogallery/', '/tenders/', '/EntDownloads/', '/tender/', '/events/', '/galleries/', '/media/', '/assets/', '/images/', '/videos/'];
 const VALID_DOC_EXTENSIONS = ['pdf', 'docx'];
 
 const isValidUrl = (url) => {
@@ -124,7 +124,7 @@ const scrapePageOrDoc = async (url, targetDomain) => {
 			}
 		});
 
-		$("script, style, noscript, iframe, svg, canvas, header, footer, nav, aside, form, img").remove();
+		$("script, style, noscript, iframe, svg, canvas, form, img").remove();
 		const pageText = cleanContent($("body").text());
 		logger.success(`Successfully scraped HTML: ${url}`);
 		return {
@@ -152,9 +152,11 @@ const scrapeWebsite = async (initialBaseUrl) => {
 	const visited = new Set([initialUrl]);
 
 	let allContent = "";
-	let siteTitle = "Untitled Site";
+	let siteTitle = "";
+	let titleFound = false;
 	const scrapingErrors = [];
 	let pagesScraped = 0, pdfsScraped = 0, docxScraped = 0;
+	const contentSections = [];
 
 	logger.info(`Crawl Start for ${targetDomain}...`);
 
@@ -177,7 +179,14 @@ const scrapeWebsite = async (initialBaseUrl) => {
 				if (pageData.type === 'docx') docxScraped++;
 				if (pageData.type === 'html') pagesScraped++;
 
-				if (pagesScraped === 1 && !siteTitle) siteTitle = pageData.title;
+				if (pagesScraped === 1 && !siteTitle) {
+					const cleanTitle = pageData.title.trim();
+					if (cleanTitle && cleanTitle.length > 3 && cleanTitle.length < 100) {
+						siteTitle = cleanTitle;
+						titleFound = true;
+						logger.success(`Found site title: ${siteTitle}`);
+					}
+				}
 
 				allContent += `\n\n--- START OF CONTENT FROM ${pageData.type.toUpperCase()}: ${pageData.url} ---\n${pageData.content}\n--- END OF CONTENT FROM ${pageData.type.toUpperCase()}: ${pageData.url} ---\n`;
 			}
@@ -193,9 +202,23 @@ const scrapeWebsite = async (initialBaseUrl) => {
 		}
 	}
 
+	// Calculate final statistics
 	const duration = Date.now() - startTime;
-	logger.info("-------------------- CRAWL COMPLETE --------------------");
-	logger.success(`Completed in ${(duration / 1000).toFixed(2)}s. Total unique links found: ${visited.size}.`);
+	stats.averageContentQuality = stats.totalPages > 0 ?
+		(contentSections.reduce((sum, section) => sum + section.quality, 0) / contentSections.length) : 0;
+
+	// Sort content sections by quality for better organization
+	contentSections.sort((a, b) => b.quality - a.quality);
+
+	// Set fallback title if none was found
+	if (!siteTitle) {
+		siteTitle = `${targetDomain} - Scraped Content`;
+		logger.warn(`No suitable title found, using fallback: ${siteTitle}`);
+	}
+
+	// Generate final report
+	logger.info("📋 ==================== CRAWL COMPLETE ====================");
+	logger.success(`✅ Completed in ${(duration / 1000).toFixed(2)}s. Total unique links found: ${visited.size}.`);
 	logger.info(`HTML: ${pagesScraped}, PDFs: ${pdfsScraped}, DOCX: ${docxScraped}, Errors: ${scrapingErrors.length}`);
 
 	return {
